@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 <#
-NoSpamProxy 16.1 Message Tracking Viewer
+NoSpamProxy 16.1 Message Tracking Viewer v14
 - WPF GUI
 - Basic authentication via Connect-Nsp
 - Server-side MessageTrack filtering
@@ -126,6 +126,193 @@ function Get-AddressValue {
         }
     }
     return (@($matches) -join '; ')
+}
+
+
+function Get-ContentFilterSetName {
+    param($Reference)
+    if ($null -eq $Reference) { return $null }
+
+    foreach ($name in @('Name','ContentFilterSetName')) {
+        $v = Get-PropValue $Reference $name
+        if (-not [string]::IsNullOrWhiteSpace([string]$v)) { return [string]$v }
+    }
+
+    $text = [string]$Reference
+    if ($text -match '^Content filter set\s+(.+)$') { return $Matches[1].Trim() }
+    if ($text -match '^Use parent settings$') { return $null }
+    if ($text -match '^Allow any$') { return $null }
+    if (-not [string]::IsNullOrWhiteSpace($text)) { return $text.Trim() }
+    return $null
+}
+
+function Test-UseParentContentFilterSet {
+    param($Reference)
+    if ($null -eq $Reference) { return $true }
+    $text = [string]$Reference
+    return ([string]::IsNullOrWhiteSpace($text) -or $text -eq 'Use parent settings')
+}
+
+function Get-EffectiveInboundContentFilterSet {
+    param([string]$SenderAddress)
+
+    $result = [ordered]@{
+        SetName          = $null
+        Source           = $null
+        Sender           = $SenderAddress
+        Domain           = $null
+        AddressSetting   = $null
+        DomainSetting    = $null
+        DefaultSetting   = $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($SenderAddress) -or $SenderAddress -notmatch '@') {
+        return [pscustomobject]$result
+    }
+
+    $domain = ($SenderAddress -split '@',2)[1]
+    $result.Domain = $domain
+
+    # Priority 1: exact partner-address override.
+    try {
+        $address = Get-NspPartnerAddress -Domain $domain |
+            Where-Object { [string]$_.MailAddress -ieq $SenderAddress } |
+            Select-Object -First 1
+
+        if ($null -ne $address) {
+            $ref = Get-PropValue $address 'InboundContentFilterSet'
+            $result.AddressSetting = Format-Nullable $ref
+            if (-not (Test-UseParentContentFilterSet $ref)) {
+                $result.SetName = Get-ContentFilterSetName $ref
+                $result.Source = 'Partner-Adresse'
+                return [pscustomobject]$result
+            }
+        }
+        else { $result.AddressSetting = 'Kein Eintrag' }
+    }
+    catch { $result.AddressSetting = 'Nicht ermittelbar: ' + $_.Exception.Message }
+
+    # Priority 2: partner/domain override.
+    try {
+        $partner = Get-NspPartner -DomainFilter $domain |
+            Where-Object { [string]$_.Domain -ieq $domain } |
+            Select-Object -First 1
+
+        if ($null -ne $partner) {
+            $ref = Get-PropValue $partner 'InboundContentFilterSet'
+            $result.DomainSetting = Format-Nullable $ref
+            if (-not (Test-UseParentContentFilterSet $ref)) {
+                $result.SetName = Get-ContentFilterSetName $ref
+                $result.Source = 'Partner-Domain'
+                return [pscustomobject]$result
+            }
+        }
+        else { $result.DomainSetting = 'Kein Partner-Eintrag' }
+    }
+    catch { $result.DomainSetting = 'Nicht ermittelbar: ' + $_.Exception.Message }
+
+    # Priority 3: global/default partner settings.
+    try {
+        $defaults = Get-NspDefaultPartnerSettings | Select-Object -First 1
+        if ($null -ne $defaults) {
+            $ref = Get-PropValue $defaults 'InboundContentFilterSet'
+            $result.DefaultSetting = Format-Nullable $ref
+            $result.SetName = Get-ContentFilterSetName $ref
+            if (-not [string]::IsNullOrWhiteSpace($result.SetName)) {
+                $result.Source = 'Standard-Partnereinstellungen'
+            }
+        }
+    }
+    catch { $result.DefaultSetting = 'Nicht ermittelbar: ' + $_.Exception.Message }
+
+    return [pscustomobject]$result
+}
+
+function Get-QueryItems {
+    param($Query)
+    if ($null -eq $Query) { return @() }
+
+    $items = New-Object System.Collections.ArrayList
+    try {
+        $enumerator = $Query.GetEnumerator()
+        while ($enumerator.MoveNext()) { [void]$items.Add($enumerator.Current) }
+    }
+    catch {
+        foreach ($x in @($Query)) { [void]$items.Add($x) }
+    }
+    return @($items)
+}
+
+function Test-ContentFilterCondition {
+    param($Condition, [string]$FileName, [string]$MimeType)
+
+    $filePattern = [string](Get-PropValue $Condition 'FileName')
+    if (-not [string]::IsNullOrWhiteSpace($filePattern)) {
+        $matchedName = $false
+        foreach ($pattern in ($filePattern -split ';')) {
+            $pattern = $pattern.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($pattern) -and $FileName -like $pattern) {
+                $matchedName = $true; break
+            }
+        }
+        if (-not $matchedName) { return $false }
+    }
+
+    $mimeObjects = @(Get-PropValue $Condition 'MimeTypes')
+    $mimeValues = @(
+        foreach ($m in $mimeObjects) {
+            $v = Get-PropValue $m 'MimeType'
+            if ($null -eq $v) { $v = [string]$m }
+            if (-not [string]::IsNullOrWhiteSpace([string]$v)) { [string]$v }
+        }
+    )
+    if ($mimeValues.Count -gt 0) {
+        if ([string]::IsNullOrWhiteSpace($MimeType) -or $MimeType -eq '—') { return $false }
+        if (-not ($mimeValues | Where-Object { $_ -ieq $MimeType })) { return $false }
+    }
+
+    $min = Get-PropValue $Condition 'MinSize'
+    $max = Get-PropValue $Condition 'MaxSize'
+    # Size-based conditions cannot be proven when the historical attachment object is absent.
+    if ($null -ne $min -or $null -ne $max) { return $false }
+
+    return $true
+}
+
+function Resolve-ContentFilterEntry {
+    param([string]$SetName, [string]$FileName, [string]$MimeType)
+    if ([string]::IsNullOrWhiteSpace($SetName) -or [string]::IsNullOrWhiteSpace($FileName)) { return $null }
+
+    try {
+        $set = Get-NspContentFilterSet -Name $SetName | Select-Object -First 1
+        if ($null -eq $set) { return $null }
+
+        $query = Get-NspContentFilterSetEntry -ContentFilterSet $set
+        $entries = @(Get-QueryItems $query | Sort-Object {[int](Get-PropValue $_ 'Index')})
+
+        foreach ($entry in $entries) {
+            $entryName = [string](Get-PropValue $entry 'Name')
+            if ([string]::IsNullOrWhiteSpace($entryName)) { continue }
+
+            $conditions = @(Get-NspContentFilterSetEntryCondition `
+                -ContentFilterSetName $SetName `
+                -ContentFilterSetEntryName $entryName)
+
+            foreach ($condition in $conditions) {
+                if (Test-ContentFilterCondition $condition $FileName $MimeType) {
+                    return [pscustomobject]@{
+                        EntryName = $entryName
+                        EntryIndex = Get-PropValue $entry 'Index'
+                        Condition = $condition
+                        ActionForUntrusted = Get-PropValue $entry 'ActionForUntrustedAndOutboundEMails'
+                        ActionForTrusted = Get-PropValue $entry 'ActionForTrustedEmails'
+                    }
+                }
+            }
+        }
+    }
+    catch { return $null }
+    return $null
 }
 
 function Convert-Status {
@@ -255,9 +442,15 @@ function New-StatusItem {
         </Grid.ColumnDefinitions>
 
         <TextBlock Grid.Row="0" Grid.Column="0" Text="Von:" VerticalAlignment="Center" Margin="3"/>
-        <DatePicker x:Name="FromDate" Grid.Row="0" Grid.Column="1" Margin="3"/>
+        <StackPanel Grid.Row="0" Grid.Column="1" Orientation="Horizontal" Margin="3">
+          <DatePicker x:Name="FromDate" Width="125"/>
+          <TextBox x:Name="FromTime" Width="55" Margin="5,0,0,0" VerticalContentAlignment="Center" ToolTip="Uhrzeit im Format HH:mm"/>
+        </StackPanel>
         <TextBlock Grid.Row="0" Grid.Column="2" Text="Bis:" VerticalAlignment="Center" Margin="10,3,3,3"/>
-        <DatePicker x:Name="ToDate" Grid.Row="0" Grid.Column="3" Margin="3"/>
+        <StackPanel Grid.Row="0" Grid.Column="3" Orientation="Horizontal" Margin="3">
+          <DatePicker x:Name="ToDate" Width="125"/>
+          <TextBox x:Name="ToTime" Width="55" Margin="5,0,0,0" VerticalContentAlignment="Center" ToolTip="Uhrzeit im Format HH:mm"/>
+        </StackPanel>
         <TextBlock Grid.Row="0" Grid.Column="4" Text="Richtung:" VerticalAlignment="Center" Margin="10,3,3,3"/>
         <ComboBox x:Name="DirectionBox" Grid.Row="0" Grid.Column="5">
           <ComboBoxItem Content="Alle" Tag=""/>
@@ -270,6 +463,21 @@ function New-StatusItem {
           <ComboBoxItem Content="250" Tag="250"/>
           <ComboBoxItem Content="500" Tag="500"/>
           <ComboBoxItem Content="1000" Tag="1000"/>
+        </ComboBox>
+        <ComboBox x:Name="TimePresetBox" Grid.Row="0" Grid.Column="8" Margin="10,0,0,0" MinWidth="145" ToolTip="NSP-Zeitraumvorgabe">
+          <ComboBoxItem Content="Angepasst" Tag="Custom"/>
+          <ComboBoxItem Content="seit 30 Minuten" Tag="30m"/>
+          <ComboBoxItem Content="seit einer Stunde" Tag="1h"/>
+          <ComboBoxItem Content="seit 2 Stunden" Tag="2h"/>
+          <ComboBoxItem Content="seit 6 Stunden" Tag="6h"/>
+          <ComboBoxItem Content="seit 12 Stunden" Tag="12h"/>
+          <ComboBoxItem Content="seit 24 Stunden" Tag="24h"/>
+          <ComboBoxItem Content="seit 2 Tagen" Tag="2d"/>
+          <ComboBoxItem Content="seit 7 Tagen" Tag="7d"/>
+          <ComboBoxItem Content="seit 14 Tagen" Tag="14d"/>
+          <ComboBoxItem Content="seit 30 Tagen" Tag="30d"/>
+          <ComboBoxItem Content="seit 60 Tagen" Tag="60d"/>
+          <ComboBoxItem Content="seit 90 Tagen" Tag="90d"/>
         </ComboBox>
 
         <TextBlock Grid.Row="1" Grid.Column="0" Text="Absender:" VerticalAlignment="Center" Margin="3"/>
@@ -328,8 +536,8 @@ function New-StatusItem {
         <Grid>
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="2*"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="2*"/>
           </Grid.RowDefinitions>
           <Border x:Name="AttachmentWarningBorder" Grid.Row="0" Background="#FFF4CE" BorderBrush="#D6B656" BorderThickness="1" Padding="7" Margin="4" Visibility="Collapsed">
             <TextBlock x:Name="AttachmentWarning" TextWrapping="Wrap" FontWeight="SemiBold"/>
@@ -341,6 +549,11 @@ function New-StatusItem {
               <DataGridTextColumn Header="Größe" Binding="{Binding SizeText}" Width="110"/>
               <DataGridTextColumn Header="Quarantäne" Binding="{Binding QuarantineText}" Width="100"/>
               <DataGridTextColumn Header="Malware-Scan" Binding="{Binding MalwareText}" Width="130"/>
+              <DataGridTextColumn Header="Inhaltsfilter" Binding="{Binding FilterSet}" Width="250"/>
+              <DataGridTextColumn Header="Filtereintrag" Binding="{Binding FilterEntry}" Width="150"/>
+              <DataGridTextColumn Header="Herkunft" Binding="{Binding FilterSource}" Width="180"/>
+              <DataGridTextColumn Header="Content-Filteraktion" Binding="{Binding FilterAction}" Width="180"/>
+              <DataGridTextColumn Header="Aktionstyp" Binding="{Binding FilterActionType}" Width="110"/>
             </DataGrid.Columns>
           </DataGrid>
           <DataGrid x:Name="AttachmentDetailGrid" Grid.Row="2" Margin="0,5,0,0">
@@ -413,7 +626,7 @@ $Window = [Windows.Markup.XamlReader]::Load($reader)
 # Bind named controls to variables.
 $names = @(
     'SearchPanel',
-    'FromDate','ToDate','DirectionBox','MaxResultsBox','SenderBox','RecipientBox',
+    'FromDate','FromTime','ToDate','ToTime','TimePresetBox','DirectionBox','MaxResultsBox','SenderBox','RecipientBox',
     'SubjectBox','SearchButton','StatusList','SelectAllStatusButton','SelectNoStatusButton','AttachmentRejectOnlyBox','ResultGrid','DetailTabs',
     'OverviewGrid','AddressGrid','AttachmentWarningBorder','AttachmentWarning',
     'AttachmentGrid','AttachmentDetailGrid','ActionGrid','FilterGrid','ActivityGrid',
@@ -425,8 +638,12 @@ foreach ($n in $names) {
 
 # ------------------------- Initial state -------------------------
 
-$FromDate.SelectedDate = (Get-Date).Date.AddDays(-1)
-$ToDate.SelectedDate   = (Get-Date).Date
+$now = Get-Date
+$FromDate.SelectedDate = $now.Date.AddMinutes(-30)
+$FromTime.Text          = $now.AddMinutes(-30).ToString('HH:mm')
+$ToDate.SelectedDate   = $now.Date
+$ToTime.Text            = $now.ToString('HH:mm')
+$TimePresetBox.SelectedIndex = 1
 $DirectionBox.SelectedIndex = 0
 $MaxResultsBox.SelectedIndex = 1
 
@@ -560,6 +777,58 @@ $Window.Add_PreviewKeyDown({
     $e.Handled = $true
 })
 
+# ------------------------- Time range -------------------------
+
+$script:ApplyingTimePreset = $false
+
+function Set-TimeRangePreset {
+    param([string]$Tag)
+    if ([string]::IsNullOrWhiteSpace($Tag) -or $Tag -eq 'Custom') { return }
+
+    $end = Get-Date
+    switch ($Tag) {
+        '30m' { $start = $end.AddMinutes(-30) }
+        '1h'  { $start = $end.AddHours(-1) }
+        '2h'  { $start = $end.AddHours(-2) }
+        '6h'  { $start = $end.AddHours(-6) }
+        '12h' { $start = $end.AddHours(-12) }
+        '24h' { $start = $end.AddHours(-24) }
+        '2d'  { $start = $end.AddDays(-2) }
+        '7d'  { $start = $end.AddDays(-7) }
+        '14d' { $start = $end.AddDays(-14) }
+        '30d' { $start = $end.AddDays(-30) }
+        '60d' { $start = $end.AddDays(-60) }
+        '90d' { $start = $end.AddDays(-90) }
+        default { return }
+    }
+
+    $script:ApplyingTimePreset = $true
+    try {
+        $FromDate.SelectedDate = $start.Date
+        $FromTime.Text = $start.ToString('HH:mm')
+        $ToDate.SelectedDate = $end.Date
+        $ToTime.Text = $end.ToString('HH:mm')
+    } finally {
+        $script:ApplyingTimePreset = $false
+    }
+}
+
+$TimePresetBox.Add_SelectionChanged({
+    $item = $TimePresetBox.SelectedItem
+    if ($null -ne $item) { Set-TimeRangePreset ([string]$item.Tag) }
+})
+
+# Manual date/time changes mean an individually adjusted range.
+$markCustom = {
+    if (-not $script:ApplyingTimePreset -and $null -ne $TimePresetBox -and $TimePresetBox.SelectedIndex -gt 0) {
+        $TimePresetBox.SelectedIndex = 0
+    }
+}
+$FromDate.Add_SelectedDateChanged($markCustom)
+$ToDate.Add_SelectedDateChanged($markCustom)
+$FromTime.Add_TextChanged($markCustom)
+$ToTime.Add_TextChanged($markCustom)
+
 # ------------------------- Search -------------------------
 
 $SearchButton.Add_Click({
@@ -570,11 +839,26 @@ $SearchButton.Add_Click({
         $StatusText.Text = 'Suche läuft …'
         $Window.Cursor = [System.Windows.Input.Cursors]::Wait
 
-        $from = $FromDate.SelectedDate
-        $to = $ToDate.SelectedDate
-        if ($null -ne $to) {
-            # DatePicker "Bis" means inclusive entire day.
-            $to = $to.Date.AddDays(1).AddTicks(-1)
+        $from = $null
+        $to = $null
+        $timeFormat = 'HH:mm'
+        $culture = [System.Globalization.CultureInfo]::InvariantCulture
+
+        if ($null -ne $FromDate.SelectedDate) {
+            $parsedFromTime = [datetime]::MinValue
+            if (-not [datetime]::TryParseExact($FromTime.Text.Trim(), $timeFormat, $culture, [System.Globalization.DateTimeStyles]::None, [ref]$parsedFromTime)) {
+                throw 'Ungültige Von-Uhrzeit. Bitte HH:mm verwenden, z. B. 08:30.'
+            }
+            $fromDateValue = [datetime]$FromDate.SelectedDate
+            $from = $fromDateValue.Date.Add($parsedFromTime.TimeOfDay)
+        }
+        if ($null -ne $ToDate.SelectedDate) {
+            $parsedToTime = [datetime]::MinValue
+            if (-not [datetime]::TryParseExact($ToTime.Text.Trim(), $timeFormat, $culture, [System.Globalization.DateTimeStyles]::None, [ref]$parsedToTime)) {
+                throw 'Ungültige Bis-Uhrzeit. Bitte HH:mm verwenden, z. B. 17:00.'
+            }
+            $toDateValue = [datetime]$ToDate.SelectedDate
+            $to = $toDateValue.Date.Add($parsedToTime.TimeOfDay)
         }
         if ($null -ne $from -and $null -ne $to -and $from -gt $to) {
             throw '"Von" darf nicht nach "Bis" liegen.'
@@ -795,27 +1079,143 @@ $ResultGrid.Add_SelectionChanged({
         # Addresses
         $AddressGrid.ItemsSource = @(Get-PropValue $detailTrack 'Addresses')
 
-        # Attachments
-        $attachmentRows = foreach ($a in $attachments) {
-            [pscustomobject]@{
-                Name           = Get-PropValue $a 'Name'
-                MimeType       = Get-PropValue $a 'MimeType'
-                SizeText       = Format-Bytes (Get-PropValue $a 'Size')
-                QuarantineText = Format-Nullable (Get-PropValue $a 'IsQuarantined')
-                MalwareText    = if ((Get-PropValue $a 'MalwareScanFailed') -eq $true) {
-                                    'Fehlgeschlagen'
-                                 } elseif ((Get-PropValue $a 'IsMalwareScanScheduled') -eq $true) {
-                                    'Geplant'
-                                 } elseif ((Get-PropValue $a 'IsMalwareScanScheduled') -eq $false) {
-                                    'Nicht geplant'
-                                 } else { '—' }
-                Attachment     = $a
+        # Attachments / AttachmentManagement
+        # NSP records the historical content-filter decision in Operation.Data
+        # for operations of type AttachmentManagement. This lets us identify the
+        # exact attachment and action that caused a rejection, even when the
+        # normal Attachments collection is empty.
+        $attachmentManagement = @()
+
+        foreach ($opLink in $operations) {
+            $op = Get-PropValue $opLink 'Operation'
+            if ($null -eq $op) { continue }
+            if ([string](Get-PropValue $op 'Type') -ne 'AttachmentManagement') { continue }
+
+            $json = [string](Get-PropValue $op 'Data')
+            if ([string]::IsNullOrWhiteSpace($json)) { continue }
+
+            try {
+                $am = $json | ConvertFrom-Json -ErrorAction Stop
+                foreach ($amAction in @($am.actions)) {
+                    if ($null -eq $amAction) { continue }
+
+                    $recipientText = @(
+                        foreach ($r in @($amAction.recipients)) {
+                            if ($null -eq $r) { continue }
+                            $lp = [string]$r.localPart
+                            $dm = [string]$r.domain
+                            if (-not [string]::IsNullOrWhiteSpace($lp) -and
+                                -not [string]::IsNullOrWhiteSpace($dm)) {
+                                "$lp@$dm"
+                            }
+                            elseif (-not [string]::IsNullOrWhiteSpace($lp)) { $lp }
+                            elseif (-not [string]::IsNullOrWhiteSpace($dm)) { $dm }
+                        }
+                    ) -join '; '
+
+                    $attachmentManagement += [pscustomobject]@{
+                        FileName                    = [string]$amAction.filename
+                        ActionName                  = [string]$amAction.action.name
+                        ActionType                  = [string]$amAction.action.actionType
+                        MailWasBlocked              = $am.mailWasBlocked
+                        MailWasPutOnHold            = $amAction.mailWasPutOnHold
+                        IsContentDisarmed           = $amAction.isContentDisarmed
+                        IsAttachmentPasswordProtected = $amAction.isAttachmentPasswordProtected
+                        Recipients                  = $recipientText
+                        Raw                         = $amAction
+                    }
+                }
+            }
+            catch {
+                # Keep the viewer usable if an older/different NSP version stores
+                # an AttachmentManagement payload that cannot be parsed.
             }
         }
+
+        # Resolve the effective inbound content-filter set from the SMTP sender.
+        # NSP precedence: exact PartnerAddress -> Partner/domain -> DefaultPartnerSettings.
+        $senderAddress = Get-AddressValue $detailTrack 'Sender'
+        $effectiveFilter = $null
+        if (-not [string]::IsNullOrWhiteSpace($senderAddress) -and $senderAddress -notmatch ';') {
+            $effectiveFilter = Get-EffectiveInboundContentFilterSet $senderAddress
+        }
+
+        $attachmentRows = @()
+
+        foreach ($a in $attachments) {
+            $name = [string](Get-PropValue $a 'Name')
+            $amInfo = @($attachmentManagement | Where-Object {
+                [string]$_.FileName -eq $name
+            } | Select-Object -First 1)
+
+            $mime = [string](Get-PropValue $a 'MimeType')
+            $resolvedEntry = $null
+            if ($null -ne $effectiveFilter -and -not [string]::IsNullOrWhiteSpace($effectiveFilter.SetName)) {
+                $resolvedEntry = Resolve-ContentFilterEntry $effectiveFilter.SetName $name $mime
+            }
+
+            $attachmentRows += [pscustomobject]@{
+                Name             = $name
+                MimeType         = $mime
+                SizeText         = Format-Bytes (Get-PropValue $a 'Size')
+                QuarantineText   = Format-Nullable (Get-PropValue $a 'IsQuarantined')
+                MalwareText      = if ((Get-PropValue $a 'MalwareScanFailed') -eq $true) {
+                                      'Fehlgeschlagen'
+                                   } elseif ((Get-PropValue $a 'IsMalwareScanScheduled') -eq $true) {
+                                      'Geplant'
+                                   } elseif ((Get-PropValue $a 'IsMalwareScanScheduled') -eq $false) {
+                                      'Nicht geplant'
+                                   } else { '—' }
+                FilterSet        = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.SetName } else { '—' }
+                FilterEntry      = if ($null -ne $resolvedEntry) { Format-Nullable $resolvedEntry.EntryName } else { '—' }
+                FilterSource     = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.Source } else { '—' }
+                FilterResolution = $effectiveFilter
+                ResolvedEntry    = $resolvedEntry
+                FilterAction     = if ($amInfo.Count -gt 0) { Format-Nullable $amInfo[0].ActionName } else { '—' }
+                FilterActionType = if ($amInfo.Count -gt 0) { Format-Nullable $amInfo[0].ActionType } else { '—' }
+                Attachment       = $a
+                Management       = if ($amInfo.Count -gt 0) { $amInfo[0] } else { $null }
+            }
+        }
+
+        # AttachmentManagement can still contain the rejected filename when the
+        # regular Attachments collection is empty. Add such files as synthetic
+        # rows so the rejection remains visible and selectable.
+        foreach ($amInfo in $attachmentManagement) {
+            $alreadyPresent = @($attachmentRows | Where-Object {
+                [string]$_.Name -eq [string]$amInfo.FileName
+            }).Count -gt 0
+
+            if (-not $alreadyPresent) {
+                $resolvedEntry = $null
+                if ($null -ne $effectiveFilter -and -not [string]::IsNullOrWhiteSpace($effectiveFilter.SetName)) {
+                    $resolvedEntry = Resolve-ContentFilterEntry $effectiveFilter.SetName ([string]$amInfo.FileName) $null
+                }
+                $attachmentRows += [pscustomobject]@{
+                    Name             = $amInfo.FileName
+                    MimeType         = '—'
+                    SizeText         = '—'
+                    QuarantineText   = '—'
+                    MalwareText      = '—'
+                    FilterSet        = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.SetName } else { '—' }
+                    FilterEntry      = if ($null -ne $resolvedEntry) { Format-Nullable $resolvedEntry.EntryName } else { '—' }
+                    FilterSource     = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.Source } else { '—' }
+                    FilterResolution = $effectiveFilter
+                    ResolvedEntry    = $resolvedEntry
+                    FilterAction     = Format-Nullable $amInfo.ActionName
+                    FilterActionType = Format-Nullable $amInfo.ActionType
+                    Attachment       = $null
+                    Management       = $amInfo
+                }
+            }
+        }
+
         $AttachmentGrid.ItemsSource = @($attachmentRows)
         $AttachmentDetailGrid.ItemsSource = $null
 
-        # ContentFiltering rejection warning.
+        # ContentFiltering rejection warning. Prefer the exact historical
+        # AttachmentManagement information; fall back to the generic tracking
+        # message for older/incomplete records.
         $rejectActions = @($actions | Where-Object {
             ([string](Get-PropValue $_ 'Decision') -match '^Reject') -or
             (-not [string]::IsNullOrWhiteSpace([string](Get-PropValue $_ 'ErrorMessage')))
@@ -824,13 +1224,39 @@ $ResultGrid.Add_SelectionChanged({
             [string](Get-PropValue $_ 'Name') -eq 'ContentFiltering'
         } | Select-Object -First 1)
 
-        if ($contentReject.Count -gt 0) {
+        $blockingAttachments = @($attachmentManagement | Where-Object {
+            ([string]$_.ActionType -eq 'Block') -or ($_.MailWasBlocked -eq $true)
+        })
+
+        if ($blockingAttachments.Count -gt 0) {
+            $warningLines = @()
+            foreach ($b in $blockingAttachments) {
+                $line = 'Die Nachricht wurde aufgrund des Anhangs "' + (Format-Nullable $b.FileName) + '" abgewiesen.'
+                if (-not [string]::IsNullOrWhiteSpace([string]$b.ActionName) -or
+                    -not [string]::IsNullOrWhiteSpace([string]$b.ActionType)) {
+                    $line += ' Content-Filteraktion: ' +
+                             (Format-Nullable $b.ActionName) +
+                             ' (' + (Format-Nullable $b.ActionType) + ').'
+                }
+                $rowInfo = @($attachmentRows | Where-Object { [string]$_.Name -eq [string]$b.FileName } | Select-Object -First 1)
+                if ($rowInfo.Count -gt 0 -and $rowInfo[0].FilterSet -ne '—') {
+                    $line += ' Inhaltsfilter: ' + $rowInfo[0].FilterSet + '.'
+                    if ($rowInfo[0].FilterEntry -ne '—') { $line += ' Filtereintrag: ' + $rowInfo[0].FilterEntry + '.' }
+                    if ($rowInfo[0].FilterSource -ne '—') { $line += ' Herkunft: ' + $rowInfo[0].FilterSource + '.' }
+                }
+                $warningLines += $line
+            }
+            $AttachmentWarning.Text = ($warningLines -join "`n")
+            $AttachmentWarningBorder.Visibility = 'Visible'
+        }
+        elseif ($contentReject.Count -gt 0) {
             $msg = Format-Nullable (Get-PropValue $contentReject[0] 'Message')
             $AttachmentWarning.Text =
                 "Die Nachricht wurde durch Content Filtering abgelehnt: $msg`n" +
-                "NoSpamProxy weist in den vorliegenden Message-Tracking-Daten nicht aus, welcher einzelne Anhang die Ablehnung ausgelöst hat."
+                "Für diese Nachricht enthalten die vorliegenden Tracking-Daten keine auswertbare AttachmentManagement-Zuordnung zu einem einzelnen Anhang."
             $AttachmentWarningBorder.Visibility = 'Visible'
-        } else {
+        }
+        else {
             $AttachmentWarningBorder.Visibility = 'Collapsed'
             $AttachmentWarning.Text = ''
         }
@@ -898,6 +1324,10 @@ PROCESSING OPERATIONS
 =====================
 $(Convert-ToRawText $operations)
 
+ATTACHMENT MANAGEMENT
+=====================
+$(Convert-ToRawText $attachmentManagement)
+
 DELIVERY ATTEMPTS
 =================
 $(Convert-ToRawText (Get-PropValue $detailTrack 'DeliveryAttempts'))
@@ -926,32 +1356,47 @@ $AttachmentGrid.Add_SelectionChanged({
         return
     }
 
-    $a = $row.Attachment
+    $a  = $row.Attachment
+    $am = $row.Management
+
     $props = [ordered]@{
-        'Dateiname'             = Get-PropValue $a 'Name'
-        'Größe'                 = Format-Bytes (Get-PropValue $a 'Size')
-        'Größe (Bytes)'         = Get-PropValue $a 'Size'
-        'MIME-Type'             = Get-PropValue $a 'MimeType'
-        'SHA-256'               = Get-PropValue $a 'Sha256Hash'
-        'TLSH'                  = Get-PropValue $a 'TlshHash'
-        'Speicherort'           = Get-PropValue $a 'Location'
-        'Folder-ID'             = Get-PropValue $a 'FolderId'
-        'Quarantäne'            = Get-PropValue $a 'IsQuarantined'
-        'Malware-Scan geplant'  = Get-PropValue $a 'IsMalwareScanScheduled'
-        'Letzter Malware-Scan'  = Get-PropValue $a 'LastMalwareScan'
-        'Malware-Scan Fehler'   = Get-PropValue $a 'MalwareScanFailed'
-        'Auto-Freigabedatum'    = Get-PropValue $a 'AutoApprovalDate'
-        'Freigabe angefordert von' = Get-PropValue $a 'ApprovalRequestedBy'
-        'Freigabe angefordert am'  = Get-PropValue $a 'ApprovalRequestedOn'
-        'Freigabegrund'         = Get-PropValue $a 'ApprovalRequestReason'
-        'Freigegeben von'       = Get-PropValue $a 'ApprovedBy'
-        'Freigegeben am'        = Get-PropValue $a 'ApprovedOn'
-        'Gelöscht von'          = Get-PropValue $a 'DeletedBy'
-        'Gelöscht am'           = Get-PropValue $a 'DeletedOn'
-        'Löschgrund'            = Get-PropValue $a 'DeleteReason'
-        'Download-Link verfügbar'= Get-PropValue $a 'IsDownloadLinkAvailable'
-        'MessageTrack-ID'       = Get-PropValue $a 'MessageTrackId'
-        'Attachment-ID'         = Get-PropValue $a 'Id'
+        'Dateiname'                = $row.Name
+        'Größe'                    = if ($null -ne $a) { Format-Bytes (Get-PropValue $a 'Size') } else { '—' }
+        'Größe (Bytes)'            = if ($null -ne $a) { Get-PropValue $a 'Size' } else { $null }
+        'MIME-Type'                = if ($null -ne $a) { Get-PropValue $a 'MimeType' } else { $null }
+        'SHA-256'                  = if ($null -ne $a) { Get-PropValue $a 'Sha256Hash' } else { $null }
+        'TLSH'                     = if ($null -ne $a) { Get-PropValue $a 'TlshHash' } else { $null }
+        'Speicherort'              = if ($null -ne $a) { Get-PropValue $a 'Location' } else { $null }
+        'Folder-ID'                = if ($null -ne $a) { Get-PropValue $a 'FolderId' } else { $null }
+        'Quarantäne'               = if ($null -ne $a) { Get-PropValue $a 'IsQuarantined' } else { $null }
+        'Malware-Scan geplant'     = if ($null -ne $a) { Get-PropValue $a 'IsMalwareScanScheduled' } else { $null }
+        'Letzter Malware-Scan'     = if ($null -ne $a) { Get-PropValue $a 'LastMalwareScan' } else { $null }
+        'Malware-Scan Fehler'      = if ($null -ne $a) { Get-PropValue $a 'MalwareScanFailed' } else { $null }
+        'Auto-Freigabedatum'       = if ($null -ne $a) { Get-PropValue $a 'AutoApprovalDate' } else { $null }
+        'Freigabe angefordert von' = if ($null -ne $a) { Get-PropValue $a 'ApprovalRequestedBy' } else { $null }
+        'Freigabe angefordert am'  = if ($null -ne $a) { Get-PropValue $a 'ApprovalRequestedOn' } else { $null }
+        'Freigabegrund'            = if ($null -ne $a) { Get-PropValue $a 'ApprovalRequestReason' } else { $null }
+        'Freigegeben von'          = if ($null -ne $a) { Get-PropValue $a 'ApprovedBy' } else { $null }
+        'Freigegeben am'           = if ($null -ne $a) { Get-PropValue $a 'ApprovedOn' } else { $null }
+        'Gelöscht von'             = if ($null -ne $a) { Get-PropValue $a 'DeletedBy' } else { $null }
+        'Gelöscht am'              = if ($null -ne $a) { Get-PropValue $a 'DeletedOn' } else { $null }
+        'Löschgrund'               = if ($null -ne $a) { Get-PropValue $a 'DeleteReason' } else { $null }
+        'Download-Link verfügbar'  = if ($null -ne $a) { Get-PropValue $a 'IsDownloadLinkAvailable' } else { $null }
+        'MessageTrack-ID'          = if ($null -ne $a) { Get-PropValue $a 'MessageTrackId' } else { $null }
+        'Attachment-ID'            = if ($null -ne $a) { Get-PropValue $a 'Id' } else { $null }
+        'Content-Filteraktion'     = if ($null -ne $am) { $am.ActionName } else { $null }
+        'Inhaltsfilter'             = $row.FilterSet
+        'Filterherkunft'            = $row.FilterSource
+        'Filtereintrag'             = $row.FilterEntry
+        'Adress-Einstellung'        = if ($null -ne $row.FilterResolution) { $row.FilterResolution.AddressSetting } else { $null }
+        'Domain-Einstellung'        = if ($null -ne $row.FilterResolution) { $row.FilterResolution.DomainSetting } else { $null }
+        'Standard-Einstellung'      = if ($null -ne $row.FilterResolution) { $row.FilterResolution.DefaultSetting } else { $null }
+        'Content-Filter Aktionstyp'= if ($null -ne $am) { $am.ActionType } else { $null }
+        'Mail blockiert'           = if ($null -ne $am) { $am.MailWasBlocked } else { $null }
+        'Passwortgeschützt'        = if ($null -ne $am) { $am.IsAttachmentPasswordProtected } else { $null }
+        'Content Disarm'           = if ($null -ne $am) { $am.IsContentDisarmed } else { $null }
+        'Mail angehalten'          = if ($null -ne $am) { $am.MailWasPutOnHold } else { $null }
+        'Betroffene Empfänger'     = if ($null -ne $am) { $am.Recipients } else { $null }
     }
     $AttachmentDetailGrid.ItemsSource = New-PropertyRows $props
 })
