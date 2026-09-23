@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 <#
-NoSpamProxy 16.1 Message Tracking Viewer v14
+NoSpamProxy 16.1 Message Tracking Viewer v22
 - WPF GUI
 - Basic authentication via Connect-Nsp
 - Server-side MessageTrack filtering
@@ -70,7 +70,7 @@ function Get-PropValue {
 
 function Format-Nullable {
     param($Value)
-    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return '—' }
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return '\u2014' }
     if ($Value -is [bool]) {
         if ($Value) { return 'Ja' } else { return 'Nein' }
     }
@@ -79,7 +79,7 @@ function Format-Nullable {
 
 function Format-Bytes {
     param($Bytes)
-    if ($null -eq $Bytes -or "$Bytes" -eq '') { return '—' }
+    if ($null -eq $Bytes -or "$Bytes" -eq '') { return '\u2014' }
     [double]$n = $Bytes
     if ($n -ge 1GB) { return ('{0:N2} GB' -f ($n / 1GB)) }
     if ($n -ge 1MB) { return ('{0:N2} MB' -f ($n / 1MB)) }
@@ -89,7 +89,7 @@ function Format-Bytes {
 
 function Format-Duration {
     param($Value)
-    if ($null -eq $Value -or "$Value" -eq '') { return '—' }
+    if ($null -eq $Value -or "$Value" -eq '') { return '\u2014' }
     try {
         $ts = [timespan]$Value
         if ($ts.TotalSeconds -lt 1) { return ('{0:N0} ms' -f $ts.TotalMilliseconds) }
@@ -267,7 +267,7 @@ function Test-ContentFilterCondition {
         }
     )
     if ($mimeValues.Count -gt 0) {
-        if ([string]::IsNullOrWhiteSpace($MimeType) -or $MimeType -eq '—') { return $false }
+        if ([string]::IsNullOrWhiteSpace($MimeType) -or $MimeType -eq '\u2014') { return $false }
         if (-not ($mimeValues | Where-Object { $_ -ieq $MimeType })) { return $false }
     }
 
@@ -327,7 +327,7 @@ function Convert-Status {
         'PartialSuccess'       { 'Mehrere Zustellzustände' }
         'DuplicateDrop'        { 'Doppelt' }
         'PutOnHold'            { 'Angehalten' }
-        default                { if ("$Status") { [string]$Status } else { '—' } }
+        default                { if ("$Status") { [string]$Status } else { '\u2014' } }
     }
 }
 
@@ -335,16 +335,17 @@ function Convert-Direction {
     param($Direction)
     switch ([string]$Direction) {
         'FromExternal' { 'Eingehend' }
+        'FromLocal'    { 'Ausgehend' }
         'FromInternal' { 'Ausgehend' }
         'Inbound'      { 'Eingehend' }
         'Outbound'     { 'Ausgehend' }
-        default        { if ("$Direction") { [string]$Direction } else { '—' } }
+        default        { if ("$Direction") { [string]$Direction } else { '\u2014' } }
     }
 }
 
 function Convert-ToRawText {
     param($Object)
-    if ($null -eq $Object) { return '—' }
+    if ($null -eq $Object) { return '\u2014' }
     return (($Object | Format-List * | Out-String -Width 220).TrimEnd())
 }
 
@@ -452,19 +453,19 @@ function New-StatusItem {
           <TextBox x:Name="ToTime" Width="55" Margin="5,0,0,0" VerticalContentAlignment="Center" ToolTip="Uhrzeit im Format HH:mm"/>
         </StackPanel>
         <TextBlock Grid.Row="0" Grid.Column="4" Text="Richtung:" VerticalAlignment="Center" Margin="10,3,3,3"/>
-        <ComboBox x:Name="DirectionBox" Grid.Row="0" Grid.Column="5">
+        <ComboBox x:Name="DirectionBox" Grid.Row="0" Grid.Column="5" Height="28" VerticalContentAlignment="Center">
           <ComboBoxItem Content="Alle" Tag=""/>
           <ComboBoxItem Content="Eingehend" Tag="FromExternal"/>
-          <ComboBoxItem Content="Ausgehend" Tag="FromInternal"/>
+          <ComboBoxItem Content="Ausgehend" Tag="FromLocal"/>
         </ComboBox>
         <TextBlock Grid.Row="0" Grid.Column="6" Text="Max. Treffer:" VerticalAlignment="Center" Margin="10,3,3,3"/>
-        <ComboBox x:Name="MaxResultsBox" Grid.Row="0" Grid.Column="7">
+        <ComboBox x:Name="MaxResultsBox" Grid.Row="0" Grid.Column="7" Height="28" VerticalContentAlignment="Center">
           <ComboBoxItem Content="100" Tag="100"/>
           <ComboBoxItem Content="250" Tag="250"/>
           <ComboBoxItem Content="500" Tag="500"/>
           <ComboBoxItem Content="1000" Tag="1000"/>
         </ComboBox>
-        <ComboBox x:Name="TimePresetBox" Grid.Row="0" Grid.Column="8" Margin="10,0,0,0" MinWidth="145" ToolTip="NSP-Zeitraumvorgabe">
+        <ComboBox x:Name="TimePresetBox" Grid.Row="0" Grid.Column="8" Margin="10,3,3,3" MinWidth="145" Height="28" VerticalContentAlignment="Center" ToolTip="NSP-Zeitraumvorgabe">
           <ComboBoxItem Content="Angepasst" Tag="Custom"/>
           <ComboBoxItem Content="seit 30 Minuten" Tag="30m"/>
           <ComboBoxItem Content="seit einer Stunde" Tag="1h"/>
@@ -484,9 +485,18 @@ function New-StatusItem {
         <TextBox x:Name="SenderBox" Grid.Row="1" Grid.Column="1"/>
         <TextBlock Grid.Row="1" Grid.Column="2" Text="Empfänger:" VerticalAlignment="Center" Margin="10,3,3,3"/>
         <TextBox x:Name="RecipientBox" Grid.Row="1" Grid.Column="3"/>
-        <TextBlock Grid.Row="1" Grid.Column="4" Text="Betreff:" VerticalAlignment="Center" Margin="10,3,3,3"/>
-        <TextBox x:Name="SubjectBox" Grid.Row="1" Grid.Column="5" Grid.ColumnSpan="3"/>
-        <Button x:Name="SearchButton" Grid.Row="1" Grid.Column="8" Content="Suchen" HorizontalAlignment="Right" MinWidth="110"/>
+        <StackPanel Grid.Row="1" Grid.Column="4" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,3,3,3">
+          <RadioButton x:Name="AddressExactBox" Content="Exakt" IsChecked="True" Margin="0,0,10,0"
+                       ToolTip="Exakter Treffer (schneller)"/>
+          <RadioButton x:Name="AddressContainsBox" Content="Enthält"
+                       ToolTip="Teiltreffer; verwendet *Suchtext*"/>
+        </StackPanel>
+        <TextBlock Grid.Row="1" Grid.Column="6" Text="Betreff:" VerticalAlignment="Center" Margin="10,3,3,3"/>
+        <TextBox x:Name="SubjectBox" Grid.Row="1" Grid.Column="7"/>
+        <StackPanel Grid.Row="1" Grid.Column="8" Orientation="Horizontal" HorizontalAlignment="Right">
+          <Button x:Name="ResetButton" Content="Reset" MinWidth="75" Margin="3"/>
+          <Button x:Name="SearchButton" Content="Suchen" MinWidth="110" Margin="3"/>
+        </StackPanel>
 
         <TextBlock Grid.Row="2" Grid.Column="0" Text="Zustellergebnis:" VerticalAlignment="Top" Margin="3,6,8,3"/>
         <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="8" Orientation="Horizontal" Margin="3,5,3,0">
@@ -626,8 +636,8 @@ $Window = [Windows.Markup.XamlReader]::Load($reader)
 # Bind named controls to variables.
 $names = @(
     'SearchPanel',
-    'FromDate','FromTime','ToDate','ToTime','TimePresetBox','DirectionBox','MaxResultsBox','SenderBox','RecipientBox',
-    'SubjectBox','SearchButton','StatusList','SelectAllStatusButton','SelectNoStatusButton','AttachmentRejectOnlyBox','ResultGrid','DetailTabs',
+    'FromDate','FromTime','ToDate','ToTime','TimePresetBox','DirectionBox','MaxResultsBox','SenderBox','RecipientBox','AddressExactBox','AddressContainsBox',
+    'SubjectBox','ResetButton','SearchButton','StatusList','SelectAllStatusButton','SelectNoStatusButton','AttachmentRejectOnlyBox','ResultGrid','DetailTabs',
     'OverviewGrid','AddressGrid','AttachmentWarningBorder','AttachmentWarning',
     'AttachmentGrid','AttachmentDetailGrid','ActionGrid','FilterGrid','ActivityGrid',
     'DeliveryGrid','RawText','StatusText','HitCountText'
@@ -829,6 +839,53 @@ $ToDate.Add_SelectedDateChanged($markCustom)
 $FromTime.Add_TextChanged($markCustom)
 $ToTime.Add_TextChanged($markCustom)
 
+
+# ------------------------- Reset -------------------------
+
+$ResetButton.Add_Click({
+    $now = Get-Date
+
+    $FromDate.SelectedDate = $now.Date
+    $FromTime.Text          = $now.AddMinutes(-30).ToString('HH:mm')
+    $ToDate.SelectedDate   = $now.Date
+    $ToTime.Text            = $now.ToString('HH:mm')
+
+    $TimePresetBox.SelectedIndex = 1       # seit 30 Minuten
+    $DirectionBox.SelectedIndex  = 0       # Alle
+    $MaxResultsBox.SelectedIndex = 1
+
+    $SenderBox.Clear()
+    $RecipientBox.Clear()
+    $SubjectBox.Clear()
+
+    $AddressExactBox.IsChecked    = $true
+    $AddressContainsBox.IsChecked = $false
+    $AttachmentRejectOnlyBox.IsChecked = $false
+
+    foreach ($item in $StatusList.Children) {
+        $item.IsChecked = $true
+    }
+
+    $ResultGrid.ItemsSource = $null
+    $HitCountText.Text = 'Gefundene Mails: 0'
+    $script:CurrentTracks = @()
+    $script:CurrentDetail = $null
+
+    $OverviewGrid.ItemsSource = $null
+    $AddressGrid.ItemsSource = $null
+    $AttachmentGrid.ItemsSource = $null
+    $AttachmentDetailGrid.ItemsSource = $null
+    $ActionGrid.ItemsSource = $null
+    $FilterGrid.ItemsSource = $null
+    $ActivityGrid.ItemsSource = $null
+    $DeliveryGrid.ItemsSource = $null
+    $RawText.Text = ''
+    $AttachmentWarningBorder.Visibility = 'Collapsed'
+    $AttachmentWarning.Text = ''
+
+    $StatusText.Text = 'Suche auf Standardwerte zurückgesetzt.'
+})
+
 # ------------------------- Search -------------------------
 
 $SearchButton.Add_Click({
@@ -836,7 +893,7 @@ $SearchButton.Add_Click({
         $SearchButton.IsEnabled = $false
         $ResultGrid.ItemsSource = $null
         $HitCountText.Text = 'Gefundene Mails: 0'
-        $StatusText.Text = 'Suche läuft …'
+        $StatusText.Text = 'Suche läuft \u2026'
         $Window.Cursor = [System.Windows.Input.Cursors]::Wait
 
         $from = $null
@@ -884,14 +941,30 @@ $SearchButton.Add_Click({
         }
 
         $dirItem = $DirectionBox.SelectedItem
-        if ($null -ne $dirItem -and -not [string]::IsNullOrWhiteSpace([string]$dirItem.Tag)) {
-            $common.Directions = [string]$dirItem.Tag
+        $selectedDirection = if ($null -ne $dirItem) { [string]$dirItem.Tag } else { '' }
+
+        # MessageTrack result objects in NSP 16.1 do not expose their direction.
+        # Therefore query the directions separately and carry the query direction
+        # into each result row.
+        $queryDirections = if (-not [string]::IsNullOrWhiteSpace($selectedDirection)) {
+            @($selectedDirection)
+        } else {
+            @('FromExternal','FromLocal')
         }
 
-        # NSP exposes address searching as Between1/Between2.
-        # With both fields set, both are passed server-side. With only one, Between1 is used.
+        # NSP exposes address searching as Between1/Between2. Wildcards are supported:
+        # exact mode passes the address unchanged; contains mode wraps each value in *...*.
+        # Between1/Between2 search across the participating message addresses, matching
+        # NoSpamProxy's common sender/recipient address search behavior.
         $sender = $SenderBox.Text.Trim()
         $recipient = $RecipientBox.Text.Trim()
+        $containsAddress = ($AddressContainsBox.IsChecked -eq $true)
+
+        if ($containsAddress) {
+            if ($sender)    { $sender    = '*' + $sender.Trim('*')    + '*' }
+            if ($recipient) { $recipient = '*' + $recipient.Trim('*') + '*' }
+        }
+
         if ($sender) { $common.Between1 = $sender }
         if ($recipient) {
             if ($sender) { $common.Between2 = $recipient }
@@ -920,68 +993,79 @@ $SearchButton.Add_Click({
         $all = New-Object System.Collections.ArrayList
         $seen = @{}
 
-        foreach ($status in $queryStatusSets) {
-            [uint64]$skip = 0
-            while ($all.Count -lt $maxResults) {
-                $p = @{} + $common
-                $p.Skip = $skip
-                $p.First = [uint64][Math]::Min(100, ($maxResults - $all.Count))
-                if ($null -ne $status) { $p.Status = $status }
+        foreach ($queryDirection in $queryDirections) {
+            $directionCount = 0
+            foreach ($status in $queryStatusSets) {
+                [uint64]$skip = 0
+                while ($directionCount -lt $maxResults) {
+                    $p = @{} + $common
+                    $p.Directions = $queryDirection
+                    $p.Skip = $skip
+                    $p.First = [uint64][Math]::Min(100, ($maxResults - $directionCount))
+                    if ($null -ne $status) { $p.Status = $status }
 
-                $batch = @(Get-NspMessageTrack @p)
-                if ($batch.Count -eq 0) { break }
+                    $batch = @(Get-NspMessageTrack @p)
+                    if ($batch.Count -eq 0) { break }
 
-                foreach ($track in $batch) {
-                    if ($attachmentRejectOnly) {
-                        $attachmentPolicyReject = $false
+                    foreach ($track in $batch) {
+                        if ($attachmentRejectOnly) {
+                            $attachmentPolicyReject = $false
 
-                        foreach ($action in @(Get-PropValue $track 'Actions')) {
-                            $actionName = [string](Get-PropValue $action 'Name')
-                            $decision   = [string](Get-PropValue $action 'Decision')
-                            $message    = [string](Get-PropValue $action 'Message')
-                            $errorMsg   = [string](Get-PropValue $action 'ErrorMessage')
-                            $combined   = ($message + ' ' + $errorMsg)
+                            foreach ($action in @(Get-PropValue $track 'Actions')) {
+                                $actionName = [string](Get-PropValue $action 'Name')
+                                $decision   = [string](Get-PropValue $action 'Decision')
+                                $message    = [string](Get-PropValue $action 'Message')
+                                $errorMsg   = [string](Get-PropValue $action 'ErrorMessage')
+                                $combined   = ($message + ' ' + $errorMsg)
 
-                            if ($actionName -eq 'ContentFiltering' -and
-                                $decision -match '^Reject' -and
-                                $combined -match '(?i)\battachment\b|\banhang\b|\banhänge\b') {
-                                $attachmentPolicyReject = $true
-                                break
+                                if ($actionName -eq 'ContentFiltering' -and
+                                    $decision -match '^Reject' -and
+                                    $combined -match '(?i)\battachment\b|\banhang\b|\banhänge\b') {
+                                    $attachmentPolicyReject = $true
+                                    break
+                                }
                             }
+
+                            if (-not $attachmentPolicyReject) { continue }
                         }
 
-                        if (-not $attachmentPolicyReject) {
-                            continue
+                        $id = [string](Get-PropValue $track 'Id')
+                        if (-not $seen.ContainsKey($id)) {
+                            $seen[$id] = $true
+                            [void]$all.Add([pscustomobject]@{
+                                Track = $track
+                                DirectionText = Convert-Direction $queryDirection
+                            })
+                            $directionCount++
+                            if ($directionCount -ge $maxResults) { break }
                         }
                     }
 
-                    $id = [string](Get-PropValue $track 'Id')
-                    if (-not $seen.ContainsKey($id)) {
-                        $seen[$id] = $true
-                        [void]$all.Add($track)
-                        if ($all.Count -ge $maxResults) { break }
-                    }
+                    if ($batch.Count -lt [int]$p.First) { break }
+                    $skip += [uint64]$batch.Count
                 }
-
-                if ($batch.Count -lt [int]$p.First) { break }
-                $skip += [uint64]$batch.Count
+                if ($directionCount -ge $maxResults) { break }
             }
-            if ($all.Count -ge $maxResults) { break }
         }
 
-        $script:CurrentTracks = @($all)
+        # Both directions have now been queried. Apply MaxResults only after
+        # merging them, so a busy inbound direction cannot suppress outbound
+        # results.
+        $script:CurrentTracks = @(
+            $all |
+                Sort-Object { $_.Track.Sent } -Descending |
+                Select-Object -First $maxResults
+        )
 
         $rows = New-Object System.Collections.ArrayList
-        foreach ($t in $script:CurrentTracks) {
+        foreach ($queryResult in $script:CurrentTracks) {
+            $t = $queryResult.Track
             $sent = Get-PropValue $t 'Sent'
             $status = Get-PropValue $t 'Status'
-            $direction = Get-PropValue $t 'Direction'
-            if ($null -eq $direction) { $direction = Get-PropValue $t 'Directions' }
-
             [void]$rows.Add([pscustomobject]@{
-                SentText        = if ($sent) { ([datetimeoffset]$sent).LocalDateTime.ToString('dd.MM.yyyy HH:mm:ss') } else { '—' }
+                SentText        = if ($sent) { ([datetimeoffset]$sent).LocalDateTime.ToString('dd.MM.yyyy HH:mm:ss') } else { '\u2014' }
                 StatusText      = Convert-Status $status
-                DirectionText   = Convert-Direction $direction
+                DirectionText   = $queryResult.DirectionText
                 Sender          = Get-AddressValue $t 'Sender'
                 HeaderFrom      = Get-AddressValue $t 'HeaderFrom'
                 Recipient       = Get-AddressValue $t 'Recipient'
@@ -1017,7 +1101,7 @@ $ResultGrid.Add_SelectionChanged({
 
     try {
         $Window.Cursor = [System.Windows.Input.Cursors]::Wait
-        $StatusText.Text = 'Details werden geladen …'
+        $StatusText.Text = 'Details werden geladen \u2026'
 
         $baseTrack = $row.Track
         $mailId = Get-PropValue $baseTrack 'MailId'
@@ -1165,14 +1249,14 @@ $ResultGrid.Add_SelectionChanged({
                                       'Geplant'
                                    } elseif ((Get-PropValue $a 'IsMalwareScanScheduled') -eq $false) {
                                       'Nicht geplant'
-                                   } else { '—' }
-                FilterSet        = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.SetName } else { '—' }
-                FilterEntry      = if ($null -ne $resolvedEntry) { Format-Nullable $resolvedEntry.EntryName } else { '—' }
-                FilterSource     = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.Source } else { '—' }
+                                   } else { '\u2014' }
+                FilterSet        = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.SetName } else { '\u2014' }
+                FilterEntry      = if ($null -ne $resolvedEntry) { Format-Nullable $resolvedEntry.EntryName } else { '\u2014' }
+                FilterSource     = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.Source } else { '\u2014' }
                 FilterResolution = $effectiveFilter
                 ResolvedEntry    = $resolvedEntry
-                FilterAction     = if ($amInfo.Count -gt 0) { Format-Nullable $amInfo[0].ActionName } else { '—' }
-                FilterActionType = if ($amInfo.Count -gt 0) { Format-Nullable $amInfo[0].ActionType } else { '—' }
+                FilterAction     = if ($amInfo.Count -gt 0) { Format-Nullable $amInfo[0].ActionName } else { '\u2014' }
+                FilterActionType = if ($amInfo.Count -gt 0) { Format-Nullable $amInfo[0].ActionType } else { '\u2014' }
                 Attachment       = $a
                 Management       = if ($amInfo.Count -gt 0) { $amInfo[0] } else { $null }
             }
@@ -1193,13 +1277,13 @@ $ResultGrid.Add_SelectionChanged({
                 }
                 $attachmentRows += [pscustomobject]@{
                     Name             = $amInfo.FileName
-                    MimeType         = '—'
-                    SizeText         = '—'
-                    QuarantineText   = '—'
-                    MalwareText      = '—'
-                    FilterSet        = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.SetName } else { '—' }
-                    FilterEntry      = if ($null -ne $resolvedEntry) { Format-Nullable $resolvedEntry.EntryName } else { '—' }
-                    FilterSource     = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.Source } else { '—' }
+                    MimeType         = '\u2014'
+                    SizeText         = '\u2014'
+                    QuarantineText   = '\u2014'
+                    MalwareText      = '\u2014'
+                    FilterSet        = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.SetName } else { '\u2014' }
+                    FilterEntry      = if ($null -ne $resolvedEntry) { Format-Nullable $resolvedEntry.EntryName } else { '\u2014' }
+                    FilterSource     = if ($null -ne $effectiveFilter) { Format-Nullable $effectiveFilter.Source } else { '\u2014' }
                     FilterResolution = $effectiveFilter
                     ResolvedEntry    = $resolvedEntry
                     FilterAction     = Format-Nullable $amInfo.ActionName
@@ -1239,10 +1323,10 @@ $ResultGrid.Add_SelectionChanged({
                              ' (' + (Format-Nullable $b.ActionType) + ').'
                 }
                 $rowInfo = @($attachmentRows | Where-Object { [string]$_.Name -eq [string]$b.FileName } | Select-Object -First 1)
-                if ($rowInfo.Count -gt 0 -and $rowInfo[0].FilterSet -ne '—') {
+                if ($rowInfo.Count -gt 0 -and $rowInfo[0].FilterSet -ne '\u2014') {
                     $line += ' Inhaltsfilter: ' + $rowInfo[0].FilterSet + '.'
-                    if ($rowInfo[0].FilterEntry -ne '—') { $line += ' Filtereintrag: ' + $rowInfo[0].FilterEntry + '.' }
-                    if ($rowInfo[0].FilterSource -ne '—') { $line += ' Herkunft: ' + $rowInfo[0].FilterSource + '.' }
+                    if ($rowInfo[0].FilterEntry -ne '\u2014') { $line += ' Filtereintrag: ' + $rowInfo[0].FilterEntry + '.' }
+                    if ($rowInfo[0].FilterSource -ne '\u2014') { $line += ' Herkunft: ' + $rowInfo[0].FilterSource + '.' }
                 }
                 $warningLines += $line
             }
@@ -1361,7 +1445,7 @@ $AttachmentGrid.Add_SelectionChanged({
 
     $props = [ordered]@{
         'Dateiname'                = $row.Name
-        'Größe'                    = if ($null -ne $a) { Format-Bytes (Get-PropValue $a 'Size') } else { '—' }
+        'Größe'                    = if ($null -ne $a) { Format-Bytes (Get-PropValue $a 'Size') } else { '\u2014' }
         'Größe (Bytes)'            = if ($null -ne $a) { Get-PropValue $a 'Size' } else { $null }
         'MIME-Type'                = if ($null -ne $a) { Get-PropValue $a 'MimeType' } else { $null }
         'SHA-256'                  = if ($null -ne $a) { Get-PropValue $a 'Sha256Hash' } else { $null }
