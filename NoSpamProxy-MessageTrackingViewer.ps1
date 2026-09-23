@@ -218,6 +218,7 @@ function New-StatusItem {
       <Setter Property="IsReadOnly" Value="True"/>
       <Setter Property="SelectionMode" Value="Single"/>
       <Setter Property="SelectionUnit" Value="FullRow"/>
+      <Setter Property="ClipboardCopyMode" Value="ExcludeHeader"/>
       <Setter Property="CanUserAddRows" Value="False"/>
       <Setter Property="GridLinesVisibility" Value="Horizontal"/>
       <Setter Property="HeadersVisibility" Value="Column"/>
@@ -489,6 +490,75 @@ $script:Connected = $true
 $script:CurrentTracks = @()
 $script:CurrentDetail = $null
 $StatusText.Text = 'Bei NoSpamProxy angemeldet. Bereit.'
+
+# Ctrl+C in a DataGrid: copy only the value of the currently focused cell.
+# Full-row selection remains unchanged so detail loading continues to work.
+$Window.Add_PreviewKeyDown({
+    param($sender, $e)
+
+    if ($e.Key -ne [System.Windows.Input.Key]::C -or
+        -not ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) {
+        return
+    }
+
+    $element = [System.Windows.Input.Keyboard]::FocusedElement
+    if ($null -eq $element) { return }
+
+    # Walk up the visual tree to the DataGridCell.
+    $cell = $element
+    while ($null -ne $cell -and -not ($cell -is [System.Windows.Controls.DataGridCell])) {
+        try { $cell = [System.Windows.Media.VisualTreeHelper]::GetParent($cell) }
+        catch { $cell = $null }
+    }
+    if ($null -eq $cell) { return }
+
+    # Find the owning DataGrid.
+    $grid = $cell
+    while ($null -ne $grid -and -not ($grid -is [System.Windows.Controls.DataGrid])) {
+        try { $grid = [System.Windows.Media.VisualTreeHelper]::GetParent($grid) }
+        catch { $grid = $null }
+    }
+    if ($null -eq $grid) { return }
+
+    $item = $cell.DataContext
+    $column = $cell.Column
+    if ($null -eq $item -or $null -eq $column) { return }
+
+    $value = $null
+
+    # DataGridTextColumn: evaluate its Binding.Path against the row object.
+    if ($column -is [System.Windows.Controls.DataGridBoundColumn]) {
+        $binding = $column.Binding
+        if ($null -ne $binding -and $null -ne $binding.Path) {
+            $path = [string]$binding.Path.Path
+            if (-not [string]::IsNullOrWhiteSpace($path)) {
+                $prop = $item.PSObject.Properties[$path]
+                if ($null -ne $prop) {
+                    $value = $prop.Value
+                }
+            }
+        }
+    }
+
+    # Auto-generated/fallback columns: use the displayed TextBlock/TextBox content.
+    if ($null -eq $value) {
+        $content = $cell.Content
+        if ($content -is [System.Windows.Controls.TextBlock]) {
+            $value = $content.Text
+        }
+        elseif ($content -is [System.Windows.Controls.TextBox]) {
+            $value = $content.Text
+        }
+        elseif ($null -ne $content) {
+            $value = [string]$content
+        }
+    }
+
+    if ($null -eq $value) { $value = '' }
+
+    [System.Windows.Clipboard]::SetText([string]$value)
+    $e.Handled = $true
+})
 
 # ------------------------- Search -------------------------
 
